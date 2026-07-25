@@ -1,0 +1,33 @@
+name: crosslingual-paper-editor
+
+services:
+  app:
+    image: crosslingual-paper-editor:latest
+    build:
+      context: .
+      target: runtime
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${APP_ENV_FILE:-.env}
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3001
+    ports:
+      - "${APP_BIND_IP:-0.0.0.0}:${APP_PORT:-3001}:3001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+for-test.txt
+需求文档.md
+node_modules
+dist
+dist-server
+coverage
+playwright-report
+test-results
+*.log
+*.local
+*.tsbuildinfo

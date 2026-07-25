@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-server/
+coverage/
+playwright-report/
+test-results/
+.env
+for-test.txt
+需求文档.md
+*.local
+*.log
+*.tsbuildinfo
