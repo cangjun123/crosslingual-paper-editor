@@ -87,7 +87,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-如果服务器访问 npm 官方源较慢，可以在 `.env` 中增加：
+Docker 构建只执行一次 `npm ci`，编译完成后会裁剪开发依赖，以降低低内存服务器的构建峰值。如果服务器访问 npm 官方源较慢，可以在 `.env` 中增加：
 
 ```env
 NPM_REGISTRY=https://registry.npmmirror.com
