@@ -1,7 +1,10 @@
 import {
   appSettingsSchema,
+  normalizeEnglishSource,
   projectDataSchema,
   type AppSettings,
+  type EditorState,
+  type HistoryItem,
   type ProjectData,
 } from "../../shared/contracts";
 
@@ -21,7 +24,12 @@ type LoadResult<T> = {
 };
 
 export function loadProject(): LoadResult<ProjectData> {
-  return loadValidated(PROJECT_STORAGE_KEY, projectDataSchema, "本地项目数据已损坏，未自动载入。");
+  const loaded = loadValidated(
+    PROJECT_STORAGE_KEY,
+    projectDataSchema,
+    "本地项目数据已损坏，未自动载入。",
+  );
+  return loaded.value ? { value: normalizeProjectData(loaded.value) } : loaded;
 }
 
 export function loadSettings(): LoadResult<AppSettings> {
@@ -29,7 +37,7 @@ export function loadSettings(): LoadResult<AppSettings> {
 }
 
 export function saveProject(project: ProjectData): void {
-  saveValidated(PROJECT_STORAGE_KEY, projectDataSchema.parse(project));
+  saveValidated(PROJECT_STORAGE_KEY, normalizeProjectData(projectDataSchema.parse(project)));
 }
 
 export function saveSettings(settings: AppSettings): void {
@@ -55,11 +63,12 @@ export function parseProjectJson(source: string): ProjectData {
   if (!result.success) {
     throw new PersistenceError("JSON 项目结构无效，未导入任何数据。", result.error);
   }
-  return result.data;
+  return normalizeProjectData(result.data);
 }
 
 export function downloadProject(project: ProjectData): void {
-  const blob = new Blob([`${JSON.stringify(projectDataSchema.parse(project), null, 2)}\n`], {
+  const normalized = normalizeProjectData(projectDataSchema.parse(project));
+  const blob = new Blob([`${JSON.stringify(normalized, null, 2)}\n`], {
     type: "application/json;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);
@@ -68,6 +77,23 @@ export function downloadProject(project: ProjectData): void {
   anchor.download = `crosslingual-paper-editor-${fileTimestamp(new Date())}.json`;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function normalizeProjectData(project: ProjectData): ProjectData {
+  return {
+    ...project,
+    current: withTranslationSource(project.current),
+    history: project.history.map(withTranslationSource),
+  };
+}
+
+function withTranslationSource<T extends EditorState | HistoryItem>(value: T): T {
+  return {
+    ...value,
+    translatedFromEnglish: value.originalChinese
+      ? normalizeEnglishSource(value.translatedFromEnglish ?? value.originalEnglish)
+      : undefined,
+  };
 }
 
 function loadValidated<T>(

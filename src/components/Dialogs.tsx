@@ -8,6 +8,8 @@ export type Confirmation = {
   confirmLabel: string;
   destructive?: boolean;
   onConfirm: () => void;
+  secondaryLabel?: string;
+  onSecondary?: () => void;
 };
 
 type ConfirmDialogProps = {
@@ -36,6 +38,18 @@ export function ConfirmDialog({ confirmation, onClose }: ConfirmDialogProps) {
           <button type="button" className="button secondary" onClick={onClose} autoFocus>
             取消
           </button>
+          {confirmation.secondaryLabel && confirmation.onSecondary && (
+            <button
+              type="button"
+              className="button secondary"
+              onClick={() => {
+                onClose();
+                confirmation.onSecondary?.();
+              }}
+            >
+              {confirmation.secondaryLabel}
+            </button>
+          )}
           <button
             type="button"
             className={`button ${confirmation.destructive ? "danger" : "primary"}`}

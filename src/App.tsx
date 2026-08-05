@@ -28,6 +28,7 @@ import {
   DEFAULT_SETTINGS,
   createEmptyEditorState,
   createEmptyProject,
+  normalizeEnglishSource,
   reviseRequestSchema,
   translateRequestSchema,
   type AppSettings,
@@ -84,7 +85,6 @@ export default function App() {
   const [hydrated, setHydrated] = useState(false);
   const [generation, setGeneration] = useState<GenerationState | null>(null);
   const [lastRevisionRequest, setLastRevisionRequest] = useState<ParsedReviseRequest | null>(null);
-  const [translationSource, setTranslationSource] = useState<string | null>(null);
   const [revisionSignature, setRevisionSignature] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
@@ -143,9 +143,6 @@ export default function App() {
       setConfig(remoteConfig);
       setSettings(normalizedSettings);
       setProject(normalizedProject);
-      setTranslationSource(
-        normalizedProject.current.originalChinese ? normalizedProject.current.originalEnglish : null,
-      );
       setRevisionSignature(
         normalizedProject.current.revisedEnglish
           ? signatureForCurrent(normalizedProject.current, normalizedSettings)
@@ -242,7 +239,9 @@ export default function App() {
     ? signatureForRequest(currentRevisionRequest)
     : null;
   const translationStale = Boolean(
-    current.originalChinese && translationSource !== null && translationSource !== current.originalEnglish,
+    current.originalChinese &&
+      current.translatedFromEnglish !== undefined &&
+      current.translatedFromEnglish !== normalizeEnglishSource(current.originalEnglish),
   );
   const revisionStale = Boolean(
     current.revisedEnglish && revisionSignature && revisionSignature !== currentRevisionSignature,
@@ -279,16 +278,16 @@ export default function App() {
     if (overwritesEdits) {
       setConfirmation({
         title: "重新生成中文译文？",
-        message: "当前中文修改和英文结果会在生成成功后被替换。",
-        confirmLabel: "重新生成",
-        onConfirm: () => void runTranslation(),
+        message: "当前中文修改和英文结果会被自动备份，然后使用当前英文重新生成译文。",
+        confirmLabel: "备份并重新生成",
+        onConfirm: () => void runTranslation({ backupCurrent: true }),
       });
       return;
     }
     void runTranslation();
   }
 
-  async function runTranslation() {
+  async function runTranslation(options: { backupCurrent?: boolean } = {}) {
     let request;
     try {
       request = translateRequestSchema.parse({
@@ -299,6 +298,10 @@ export default function App() {
       });
     } catch (error) {
       showError(error, setNotice);
+      return;
+    }
+
+    if (options.backupCurrent && !saveAutomaticBackup()) {
       return;
     }
 
@@ -319,16 +322,21 @@ export default function App() {
         ...previous,
         current: {
           ...previous.current,
+          translatedFromEnglish: request.originalEnglish,
           originalChinese: translated,
           editedChinese: translated,
           revisedEnglish: "",
         },
       }));
-      setTranslationSource(request.originalEnglish);
       setRevisionSignature(null);
       setLastRevisionRequest(null);
       setChineseTab("edited");
-      setNotice({ kind: "success", message: "中文译文已生成。" });
+      setNotice({
+        kind: "success",
+        message: options.backupCurrent
+          ? "中文译文已生成；原内容已保存到历史版本。"
+          : "中文译文已生成。",
+      });
     } catch (error) {
       if (!isAbortError(error)) {
         showError(error, setNotice);
@@ -343,7 +351,14 @@ export default function App() {
 
   function requestRevision() {
     if (translationStale) {
-      setNotice({ kind: "warning", message: "原英文已变化，请先重新生成中文译文。" });
+      setConfirmation({
+        title: "原英文已在翻译后发生变化",
+        message: "当前中文修改仍然保留。可以恢复翻译时的英文后继续回写，或先自动备份再重新翻译当前英文。",
+        confirmLabel: "备份并重新翻译",
+        onConfirm: () => void runTranslation({ backupCurrent: true }),
+        secondaryLabel: "恢复翻译时英文",
+        onSecondary: restoreTranslatedEnglish,
+      });
       return;
     }
     if (!currentRevisionRequest) {
@@ -351,6 +366,30 @@ export default function App() {
       return;
     }
     void runRevision(currentRevisionRequest);
+  }
+
+  function restoreTranslatedEnglish() {
+    const translatedFromEnglish = current.translatedFromEnglish;
+    if (translatedFromEnglish === undefined) {
+      setNotice({ kind: "error", message: "无法确定生成当前中文译文时使用的英文。" });
+      return;
+    }
+
+    const backup = createHistoryItem(current, settings, "automatic");
+    const next = {
+      ...project,
+      current: { ...current, originalEnglish: translatedFromEnglish },
+      history: [backup, ...project.history],
+    };
+    if (commitProject(next, setProject, setNotice)) {
+      setNotice({ kind: "success", message: "已恢复翻译时英文；刚才的内容已自动备份。" });
+    }
+  }
+
+  function saveAutomaticBackup(): boolean {
+    const backup = createHistoryItem(current, settings, "automatic");
+    const next = { ...project, history: [backup, ...project.history] };
+    return commitProject(next, setProject, setNotice);
   }
 
   async function runRevision(request: ParsedReviseRequest) {
@@ -411,18 +450,7 @@ export default function App() {
       setNotice({ kind: "error", message: "至少需要原英文内容才能保存版本。" });
       return;
     }
-    const item: HistoryItem = {
-      id: crypto.randomUUID(),
-      createdAt: new Date().toISOString(),
-      model: settings.model.trim(),
-      originalEnglish: current.originalEnglish,
-      fullPaperContext: current.fullPaperContext,
-      originalChinese: current.originalChinese,
-      editedChinese: current.editedChinese,
-      chineseDiff: serializeChineseDiff(current.originalChinese, current.editedChinese),
-      extraInstruction: current.extraInstruction,
-      revisedEnglish: current.revisedEnglish,
-    };
+    const item = createHistoryItem(current, settings, "manual");
     const next = { ...project, history: [item, ...project.history] };
     if (commitProject(next, setProject, setNotice)) {
       setNotice({ kind: "success", message: "当前版本已保存。" });
@@ -451,7 +479,6 @@ export default function App() {
     };
     if (commitProject(next, setProject, setNotice)) {
       setGeneration(null);
-      setTranslationSource(null);
       setRevisionSignature(null);
       setLastRevisionRequest(null);
       setNotice({ kind: "success", message: "当前任务已清空。" });
@@ -471,6 +498,7 @@ export default function App() {
     const model = item.model.trim() || settings.model || config.defaultModel;
     const restored: EditorState = {
       originalEnglish: item.originalEnglish,
+      translatedFromEnglish: item.translatedFromEnglish,
       fullPaperContext: item.fullPaperContext ?? "",
       originalChinese: item.originalChinese,
       editedChinese: item.editedChinese,
@@ -482,7 +510,6 @@ export default function App() {
     if (commitProject(next, setProject, setNotice)) {
       const nextSettings = { ...settings, model };
       setSettings(nextSettings);
-      setTranslationSource(restored.originalChinese ? restored.originalEnglish : null);
       setRevisionSignature(restored.revisedEnglish ? signatureForCurrent(restored, nextSettings) : null);
       setLastRevisionRequest(null);
       setHistoryOpen(false);
@@ -522,9 +549,6 @@ export default function App() {
         if (commitProject(normalized, setProject, setNotice)) {
           const nextSettings = { ...settings, model };
           setSettings(nextSettings);
-          setTranslationSource(
-            normalized.current.originalChinese ? normalized.current.originalEnglish : null,
-          );
           setRevisionSignature(
             normalized.current.revisedEnglish
               ? signatureForCurrent(normalized.current, nextSettings)
@@ -687,7 +711,11 @@ export default function App() {
           <article className="editor-panel chinese-panel">
             <header className="panel-header tabbed-header">
               <div><span className="panel-index">02</span><h1>中文语义编辑</h1></div>
-              {translationStale && <span className="stale-badge">需重新翻译</span>}
+              {translationStale && (
+                <span className="stale-badge" title="点击回写按钮选择恢复英文或重新翻译">
+                  原英文已变更
+                </span>
+              )}
             </header>
             <div className="view-tabs" role="tablist" aria-label="中文视图">
               <button type="button" role="tab" aria-selected={chineseTab === "edited"} onClick={() => setChineseTab("edited")}>编辑</button>
@@ -712,7 +740,7 @@ export default function App() {
                   type="button"
                   className="button primary"
                   onClick={requestRevision}
-                  disabled={busy || !currentRevisionRequest || translationStale}
+                  disabled={busy || !currentRevisionRequest}
                 >
                   <WandSparkles size={17} />根据中文回写英文
                 </button>
@@ -824,6 +852,27 @@ export default function App() {
       {confirmation && <ConfirmDialog confirmation={confirmation} onClose={() => setConfirmation(null)} />}
     </div>
   );
+}
+
+function createHistoryItem(
+  current: EditorState,
+  settings: AppSettings,
+  saveKind: NonNullable<HistoryItem["saveKind"]>,
+): HistoryItem {
+  return {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    model: settings.model.trim(),
+    saveKind,
+    originalEnglish: current.originalEnglish,
+    translatedFromEnglish: current.translatedFromEnglish,
+    fullPaperContext: current.fullPaperContext,
+    originalChinese: current.originalChinese,
+    editedChinese: current.editedChinese,
+    chineseDiff: serializeChineseDiff(current.originalChinese, current.editedChinese),
+    extraInstruction: current.extraInstruction,
+    revisedEnglish: current.revisedEnglish,
+  };
 }
 
 function buildRevisionRequest(current: EditorState, settings: AppSettings): ParsedReviseRequest | null {

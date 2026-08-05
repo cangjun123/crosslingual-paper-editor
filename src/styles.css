@@ -978,6 +978,7 @@ input[type="range"] {
   grid-column: 1 / -1;
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
 }
@@ -1020,11 +1021,28 @@ input[type="range"] {
   font-size: 10px;
 }
 
-.history-meta span {
+.history-meta > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-model {
   max-width: 180px;
   overflow: hidden;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-backup-badge {
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 9px;
+  font-weight: 650;
   white-space: nowrap;
 }
 

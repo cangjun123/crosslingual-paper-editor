@@ -37,8 +37,13 @@ export function HistoryDrawer({ history, onRestore, onDelete, onClose }: History
             history.map((item) => (
               <article className="history-item" key={item.id}>
                 <div className="history-meta">
-                  <time dateTime={item.createdAt}>{formatHistoryTime(item.createdAt)}</time>
-                  <span>{item.model || "未指定模型"}</span>
+                  <div>
+                    <time dateTime={item.createdAt}>{formatHistoryTime(item.createdAt)}</time>
+                    {item.saveKind === "automatic" && (
+                      <span className="history-backup-badge">自动备份</span>
+                    )}
+                  </div>
+                  <span className="history-model">{item.model || "未指定模型"}</span>
                 </div>
                 <p>{snippet(item.revisedEnglish || item.originalEnglish)}</p>
                 <div className="history-actions">

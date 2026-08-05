@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const editorStateSchema = z.object({
   originalEnglish: z.string(),
+  translatedFromEnglish: z.string().optional(),
   fullPaperContext: z.string().optional(),
   originalChinese: z.string(),
   editedChinese: z.string(),
@@ -16,7 +17,9 @@ export const historyItemSchema = z.object({
   id: z.string().min(1),
   createdAt: z.iso.datetime(),
   model: z.string(),
+  saveKind: z.enum(["manual", "automatic"]).optional(),
   originalEnglish: z.string(),
+  translatedFromEnglish: z.string().optional(),
   fullPaperContext: z.string().optional(),
   originalChinese: z.string(),
   editedChinese: z.string(),
@@ -49,15 +52,27 @@ export const generationOptionsSchema = z.object({
   stream: z.boolean().default(true),
 });
 
+export function normalizeEnglishSource(value: string): string {
+  return value.replace(/\r\n?/g, "\n").trim();
+}
+
 export const translateRequestSchema = generationOptionsSchema.extend({
-  originalEnglish: z.string().trim().min(1, "原英文段落不能为空"),
+  originalEnglish: z
+    .string()
+    .trim()
+    .min(1, "原英文段落不能为空")
+    .transform(normalizeEnglishSource),
 });
 
 export type TranslateRequest = z.input<typeof translateRequestSchema>;
 export type ParsedTranslateRequest = z.output<typeof translateRequestSchema>;
 
 export const reviseRequestSchema = generationOptionsSchema.extend({
-  originalEnglish: z.string().trim().min(1, "原英文段落不能为空"),
+  originalEnglish: z
+    .string()
+    .trim()
+    .min(1, "原英文段落不能为空")
+    .transform(normalizeEnglishSource),
   fullPaperContext: z.string().optional(),
   originalChinese: z.string().trim().min(1, "请先生成中文译文"),
   editedChinese: z.string().trim().min(1, "编辑后的中文不能为空"),
@@ -104,6 +119,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 export function createEmptyEditorState(model = DEFAULT_MODEL): EditorState {
   return {
     originalEnglish: "",
+    translatedFromEnglish: undefined,
     fullPaperContext: "",
     originalChinese: "",
     editedChinese: "",
