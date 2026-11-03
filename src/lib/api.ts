@@ -2,6 +2,7 @@ import { createParser, type EventSourceMessage } from "eventsource-parser";
 import type {
   ApiErrorBody,
   ConfigResponse,
+  ListModelsRequest,
   ParsedReviseRequest,
   ParsedTranslateRequest,
   TestLlmRequest,
@@ -57,6 +58,23 @@ export async function testLlm(
     throw await readError(response);
   }
   return response.json() as Promise<{ ok: true; model: string; latencyMs: number }>;
+}
+
+export async function listModels(
+  request: ListModelsRequest,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const response = await fetch("/api/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal,
+  });
+  if (!response.ok) {
+    throw await readError(response);
+  }
+  const body = (await response.json()) as { models?: unknown };
+  return Array.isArray(body.models) ? body.models.filter((model) => typeof model === "string") : [];
 }
 
 async function generate<T extends { stream: boolean }>(

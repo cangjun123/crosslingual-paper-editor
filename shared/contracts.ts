@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { connectionSchema, providerSchema, type Provider } from "./providers.js";
 
 export const editorStateSchema = z.object({
   originalEnglish: z.string(),
@@ -38,10 +39,16 @@ export const projectDataSchema = z.object({
 
 export type ProjectData = z.infer<typeof projectDataSchema>;
 
+export const MAX_RECENT_MODELS = 12;
+
 export const appSettingsSchema = z.object({
   model: z.string(),
   temperature: z.number().min(0).max(2),
   stream: z.boolean(),
+  provider: providerSchema.default("openai"),
+  baseUrl: z.string().default(""),
+  apiKey: z.string().default(""),
+  recentModels: z.array(z.string()).max(MAX_RECENT_MODELS).default([]),
 });
 
 export type AppSettings = z.infer<typeof appSettingsSchema>;
@@ -50,6 +57,7 @@ export const generationOptionsSchema = z.object({
   model: z.string().trim().min(1, "请输入模型名称").max(200),
   temperature: z.number().min(0).max(2).default(0.2),
   stream: z.boolean().default(true),
+  connection: connectionSchema.optional(),
 });
 
 export function normalizeEnglishSource(value: string): string {
@@ -86,12 +94,20 @@ export type ParsedReviseRequest = z.output<typeof reviseRequestSchema>;
 export const testLlmRequestSchema = generationOptionsSchema.pick({
   model: true,
   temperature: true,
+  connection: true,
 });
 
 export type TestLlmRequest = z.input<typeof testLlmRequestSchema>;
 
+export const listModelsRequestSchema = z.object({
+  connection: connectionSchema.optional(),
+});
+
+export type ListModelsRequest = z.input<typeof listModelsRequestSchema>;
+
 export type ConfigResponse = {
   defaultModel: string;
+  provider: Provider;
   baseUrlConfigured: boolean;
   apiKeyConfigured: boolean;
 };
@@ -114,6 +130,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   model: DEFAULT_MODEL,
   temperature: 0.2,
   stream: true,
+  provider: "openai",
+  baseUrl: "",
+  apiKey: "",
+  recentModels: [],
 };
 
 export function createEmptyEditorState(model = DEFAULT_MODEL): EditorState {

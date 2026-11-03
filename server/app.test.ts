@@ -3,9 +3,10 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "./config.js";
 import { createApp } from "./app.js";
-import type { GenerationParams, LlmService } from "./llm.js";
+import type { GenerationParams, LlmService, ResolvedConnection } from "./llm.js";
 
 const configured: ServerConfig = {
+  provider: "openai",
   apiKey: "test-key",
   baseUrl: "https://example.test/v1",
   defaultModel: "default-test-model",
@@ -20,6 +21,13 @@ class FakeLlm implements LlmService {
     yield "修改后的";
     yield " English.";
   }
+
+  listModels = vi.fn(async () => ["model-b", "model-a", "model-b"]);
+}
+
+function appWith(llm: LlmService, config: ServerConfig = configured) {
+  const createLlm = vi.fn((_connection: ResolvedConnection) => llm);
+  return { app: createApp({ config, createLlm }), createLlm };
 }
 
 describe("API", () => {
@@ -34,12 +42,13 @@ describe("API", () => {
   });
 
   it("returns only non-sensitive configuration", async () => {
-    const response = await request(createApp({ config: configured, llm: new FakeLlm() }))
+    const response = await request(appWith(new FakeLlm()).app)
       .get("/api/config")
       .expect(200);
 
     expect(response.body).toEqual({
       defaultModel: "default-test-model",
+      provider: "openai",
       baseUrlConfigured: true,
       apiKeyConfigured: true,
     });
@@ -49,7 +58,7 @@ describe("API", () => {
 
   it("returns the documented JSON shape when streaming is disabled", async () => {
     const llm = new FakeLlm();
-    const response = await request(createApp({ config: configured, llm }))
+    const response = await request(appWith(llm).app)
       .post("/api/translate-to-chinese")
       .send({
         originalEnglish: "An academic sentence.",
@@ -64,7 +73,7 @@ describe("API", () => {
   });
 
   it("streams structured delta and done events", async () => {
-    const response = await request(createApp({ config: configured, llm: new FakeLlm() }))
+    const response = await request(appWith(new FakeLlm()).app)
       .post("/api/revise-english")
       .send({
         originalEnglish: "Original English.",
@@ -83,7 +92,7 @@ describe("API", () => {
   });
 
   it("rejects invalid generation inputs", async () => {
-    const response = await request(createApp({ config: configured, llm: new FakeLlm() }))
+    const response = await request(appWith(new FakeLlm()).app)
       .post("/api/translate-to-chinese")
       .send({ originalEnglish: "", model: "", stream: false, temperature: 0.2 })
       .expect(400);
@@ -111,7 +120,7 @@ describe("API", () => {
 
   it("tests the selected model through the same service", async () => {
     const llm = new FakeLlm();
-    const response = await request(createApp({ config: configured, llm }))
+    const response = await request(appWith(llm).app)
       .post("/api/test-llm")
       .send({ model: "selected-model", temperature: 0.4 })
       .expect(200);
@@ -120,5 +129,81 @@ describe("API", () => {
     expect(response.body.model).toBe("selected-model");
     expect(response.body.latencyMs).toEqual(expect.any(Number));
     expect(llm.complete.mock.calls[0]?.[0].model).toBe("selected-model");
+  });
+
+  it("uses browser-supplied connections instead of the server configuration", async () => {
+    const { app, createLlm } = appWith(new FakeLlm());
+    await request(app)
+      .post("/api/translate-to-chinese")
+      .send({
+        originalEnglish: "An academic sentence.",
+        model: "gemini-test",
+        temperature: 0.2,
+        stream: false,
+        connection: { provider: "gemini", baseUrl: " https://relay.test/gemini ", apiKey: " browser-key " },
+      })
+      .expect(200);
+
+    expect(createLlm).toHaveBeenCalledWith({
+      provider: "gemini",
+      baseUrl: "https://relay.test/gemini",
+      apiKey: "browser-key",
+    });
+  });
+
+  it("works with browser connections when the server has no configuration", async () => {
+    const { app } = appWith(new FakeLlm(), { ...configured, apiKey: undefined, baseUrl: undefined });
+    await request(app)
+      .post("/api/test-llm")
+      .send({
+        model: "m",
+        temperature: 0.2,
+        connection: { provider: "openai", baseUrl: "https://relay.test", apiKey: "k" },
+      })
+      .expect(200);
+  });
+
+  it("never pairs the server API key with a browser-supplied URL", async () => {
+    const { app, createLlm } = appWith(new FakeLlm());
+    const response = await request(app)
+      .post("/api/test-llm")
+      .send({
+        model: "m",
+        temperature: 0.2,
+        connection: { provider: "openai", baseUrl: "https://attacker.test/v1", apiKey: "" },
+      })
+      .expect(400);
+
+    expect(response.body.error.message).toContain("API key");
+    expect(createLlm).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the server configuration when the browser connection is empty", async () => {
+    const { app, createLlm } = appWith(new FakeLlm(), { ...configured, provider: "anthropic" });
+    await request(app)
+      .post("/api/test-llm")
+      .send({ model: "m", temperature: 0.2, connection: { provider: "gemini", baseUrl: "", apiKey: "" } })
+      .expect(200);
+
+    expect(createLlm).toHaveBeenCalledWith({
+      provider: "anthropic",
+      baseUrl: "https://example.test/v1",
+      apiKey: "test-key",
+    });
+  });
+
+  it("rejects malformed browser base URLs", async () => {
+    const { app } = appWith(new FakeLlm());
+    const response = await request(app)
+      .post("/api/models")
+      .send({ connection: { provider: "openai", baseUrl: "ftp://relay.test", apiKey: "k" } })
+      .expect(400);
+
+    expect(response.body.error.code).toBe("VALIDATION_ERROR");
+  });
+
+  it("lists models sorted and de-duplicated", async () => {
+    const response = await request(appWith(new FakeLlm()).app).post("/api/models").send({}).expect(200);
+    expect(response.body).toEqual({ models: ["model-a", "model-b"] });
   });
 });

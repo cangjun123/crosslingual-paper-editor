@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type KeyboardEvent,
 } from "react";
 import {
   AlertCircle,
@@ -15,6 +16,7 @@ import {
   History as HistoryIcon,
   Languages,
   LoaderCircle,
+  PlugZap,
   RotateCcw,
   Save,
   Settings2,
@@ -26,6 +28,7 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_SETTINGS,
+  MAX_RECENT_MODELS,
   createEmptyEditorState,
   createEmptyProject,
   normalizeEnglishSource,
@@ -38,13 +41,25 @@ import {
   type ParsedReviseRequest,
   type ProjectData,
 } from "../shared/contracts";
-import { ConfirmDialog, SettingsDialog, type Confirmation } from "./components/Dialogs";
+import {
+  PROVIDER_LABELS,
+  connectionSchema,
+  usesCustomConnection,
+  type Connection,
+} from "../shared/providers";
+import {
+  ConfirmDialog,
+  SettingsDialog,
+  type Confirmation,
+  type TestResult,
+} from "./components/Dialogs";
 import { DiffView } from "./components/DiffView";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import { IconButton } from "./components/IconButton";
 import {
   ApiClientError,
   fetchConfig,
+  listModels,
   reviseEnglish,
   testLlm,
   translateToChinese,
@@ -70,10 +85,11 @@ type Notice = {
   message: string;
 };
 
-type SaveStatus = "saved" | "saving" | "error";
+type SaveStatus = "saved" | "error";
 
 const DEFAULT_CONFIG: ConfigResponse = {
   defaultModel: DEFAULT_SETTINGS.model,
+  provider: "openai",
   baseUrlConfigured: false,
   apiKeyConfigured: false,
 };
@@ -94,7 +110,9 @@ export default function App() {
   const [chineseTab, setChineseTab] = useState<"edited" | "original">("edited");
   const [diffTab, setDiffTab] = useState<"chinese" | "english">("chinese");
   const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState<string>();
+  const [testResult, setTestResult] = useState<TestResult>();
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
@@ -171,7 +189,6 @@ export default function App() {
     if (!hydrated) {
       return;
     }
-    const statusTimer = window.setTimeout(() => setSaveStatus("saving"), 0);
     const timer = window.setTimeout(() => {
       try {
         saveProject(project);
@@ -183,7 +200,6 @@ export default function App() {
       }
     }, 500);
     return () => {
-      window.clearTimeout(statusTimer);
       window.clearTimeout(timer);
     };
   }, [project, settings, hydrated]);
@@ -251,6 +267,11 @@ export default function App() {
       currentRevisionSignature &&
       signatureForRequest(lastRevisionRequest) === currentRevisionSignature,
   );
+  const connectionStatus = describeConnection(settings, config);
+  const modelSuggestions = useMemo(
+    () => [...new Set([...settings.recentModels, ...modelOptions])],
+    [settings.recentModels, modelOptions],
+  );
 
   function updateCurrent<K extends keyof EditorState>(key: K, value: EditorState[K]) {
     setProject((previous) => ({
@@ -264,12 +285,44 @@ export default function App() {
     if (patch.model !== undefined) {
       updateCurrent("model", patch.model);
     }
+    if (patch.provider !== undefined || patch.baseUrl !== undefined || patch.apiKey !== undefined) {
+      setModelOptions([]);
+    }
     setTestResult(undefined);
+  }
+
+  function rememberModel(model: string) {
+    const trimmed = model.trim();
+    if (!trimmed) {
+      return;
+    }
+    setSettings((previous) =>
+      previous.recentModels[0] === trimmed
+        ? previous
+        : {
+            ...previous,
+            recentModels: [trimmed, ...previous.recentModels.filter((item) => item !== trimmed)].slice(
+              0,
+              MAX_RECENT_MODELS,
+            ),
+          },
+    );
+  }
+
+  function handleShortcut(event: KeyboardEvent<HTMLTextAreaElement>, action: () => void) {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !busy) {
+      event.preventDefault();
+      action();
+    }
   }
 
   function requestTranslation() {
     if (!current.originalEnglish.trim()) {
       setNotice({ kind: "error", message: "请先输入原英文段落。" });
+      return;
+    }
+    if (!connectionStatus.usable) {
+      setSettingsOpen(true);
       return;
     }
     const overwritesEdits =
@@ -295,6 +348,7 @@ export default function App() {
         model: settings.model,
         temperature: settings.temperature,
         stream: settings.stream,
+        connection: connectionFor(settings),
       });
     } catch (error) {
       showError(error, setNotice);
@@ -331,6 +385,7 @@ export default function App() {
       setRevisionSignature(null);
       setLastRevisionRequest(null);
       setChineseTab("edited");
+      rememberModel(request.model);
       setNotice({
         kind: "success",
         message: options.backupCurrent
@@ -359,6 +414,10 @@ export default function App() {
         secondaryLabel: "恢复翻译时英文",
         onSecondary: restoreTranslatedEnglish,
       });
+      return;
+    }
+    if (!connectionStatus.usable) {
+      setSettingsOpen(true);
       return;
     }
     if (!currentRevisionRequest) {
@@ -413,6 +472,7 @@ export default function App() {
       }));
       setRevisionSignature(signatureForRequest(request));
       setDiffTab("english");
+      rememberModel(request.model);
       setNotice({ kind: "success", message: "英文段落已生成。" });
     } catch (error) {
       if (!isAbortError(error)) {
@@ -584,14 +644,32 @@ export default function App() {
       const result = await testLlm({
         model: settings.model.trim(),
         temperature: settings.temperature,
+        connection: connectionFor(settings),
       });
-      setTestResult(`连接成功 · ${result.latencyMs} ms`);
+      setTestResult({ ok: true, message: `连接成功 · ${result.model} · ${result.latencyMs} ms` });
+      rememberModel(result.model);
     } catch (error) {
-      const message = errorMessage(error);
-      setTestResult(message);
-      setNotice({ kind: "error", message });
+      setTestResult({ ok: false, message: errorMessage(error) });
     } finally {
       setTestingConnection(false);
+    }
+  }
+
+  async function fetchModelOptions() {
+    setLoadingModels(true);
+    setTestResult(undefined);
+    try {
+      const models = await listModels({ connection: connectionFor(settings) });
+      setModelOptions(models);
+      setTestResult(
+        models.length > 0
+          ? { ok: true, message: `已获取 ${models.length} 个模型。` }
+          : { ok: false, message: "服务没有返回任何模型，请直接输入模型名称。" },
+      );
+    } catch (error) {
+      setTestResult({ ok: false, message: `获取模型列表失败：${errorMessage(error)}` });
+    } finally {
+      setLoadingModels(false);
     }
   }
 
@@ -623,21 +701,41 @@ export default function App() {
           </div>
         </div>
 
-        <label className="model-control">
-          <span>模型</span>
-          <input
-            type="text"
-            value={settings.model}
-            onChange={(event) => updateAppSettings({ model: event.target.value })}
+        <div className="model-bar">
+          <button
+            type="button"
+            className={`connection-chip ${connectionStatus.usable ? "" : "missing"}`.trim()}
+            onClick={() => setSettingsOpen(true)}
             disabled={busy}
-            aria-invalid={!settings.model.trim()}
-          />
-        </label>
+            title={connectionStatus.title}
+          >
+            <PlugZap size={14} />
+            <span>{connectionStatus.label}</span>
+          </button>
+          <label className="model-control">
+            <span>模型</span>
+            <input
+              type="text"
+              value={settings.model}
+              onChange={(event) => updateAppSettings({ model: event.target.value })}
+              disabled={busy}
+              aria-invalid={!settings.model.trim()}
+              list="model-options"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+          <datalist id="model-options">
+            {modelSuggestions.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
+        </div>
 
         <div className="header-actions">
           <span className={`save-status ${saveStatus}`}>
-            {saveStatus === "saving" ? <LoaderCircle className="spin" size={14} /> : saveStatus === "saved" ? <Check size={14} /> : <AlertCircle size={14} />}
-            {saveStatus === "saving" ? "保存中" : saveStatus === "saved" ? "已保存" : "未保存"}
+            {saveStatus === "saved" ? <Check size={14} /> : <AlertCircle size={14} />}
+            {saveStatus === "saved" ? "已保存" : "未保存"}
           </span>
           <IconButton label="导入 JSON" onClick={() => importInputRef.current?.click()} disabled={busy}>
             <Upload size={18} />
@@ -667,6 +765,15 @@ export default function App() {
       </header>
 
       <main className="workspace">
+        {!connectionStatus.usable && (
+          <div className="notice warning setup-notice" role="status">
+            <PlugZap size={17} />
+            <span>尚未配置模型服务。填写 Base URL、API key 和模型后即可开始使用，配置会保存在本浏览器中。</span>
+            <button type="button" className="button primary compact" onClick={() => setSettingsOpen(true)}>
+              打开设置
+            </button>
+          </div>
+        )}
         {notice && (
           <div className={`notice ${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>
             <AlertCircle size={17} />
@@ -685,6 +792,7 @@ export default function App() {
               className="editor-textarea"
               value={current.originalEnglish}
               onChange={(event) => updateCurrent("originalEnglish", event.target.value)}
+              onKeyDown={(event) => handleShortcut(event, requestTranslation)}
               placeholder="Paste the English academic paragraph here..."
               spellCheck="true"
               readOnly={busy}
@@ -701,6 +809,7 @@ export default function App() {
                   className="button primary"
                   onClick={requestTranslation}
                   disabled={busy || !current.originalEnglish.trim() || !settings.model.trim()}
+                  title="Ctrl + Enter"
                 >
                   <Languages size={17} />生成中文译文
                 </button>
@@ -726,6 +835,11 @@ export default function App() {
               className="editor-textarea"
               value={chineseText}
               onChange={(event) => updateCurrent("editedChinese", event.target.value)}
+              onKeyDown={(event) => {
+                if (chineseTab === "edited" && currentRevisionRequest) {
+                  handleShortcut(event, requestRevision);
+                }
+              }}
               placeholder={generation?.kind === "translation" ? "正在生成..." : "中文译文将在这里显示"}
               readOnly={busy || chineseTab === "original"}
               aria-label={chineseTab === "edited" ? "编辑后的中文" : "原始中文译文"}
@@ -741,6 +855,7 @@ export default function App() {
                   className="button primary"
                   onClick={requestRevision}
                   disabled={busy || !currentRevisionRequest}
+                  title="Ctrl + Enter"
                 >
                   <WandSparkles size={17} />根据中文回写英文
                 </button>
@@ -764,7 +879,7 @@ export default function App() {
               <button
                 type="button"
                 className="button secondary compact"
-                onClick={() => lastRevisionRequest && void runRevision(lastRevisionRequest)}
+                onClick={() => currentRevisionRequest && void runRevision(currentRevisionRequest)}
                 disabled={busy || !canRetry}
                 title={lastRevisionRequest && !canRetry ? "输入已变化，请使用当前输入重新生成" : "使用上次相同输入重新生成"}
               >
@@ -836,8 +951,11 @@ export default function App() {
           config={config}
           testing={testingConnection}
           testResult={testResult}
+          modelOptions={modelSuggestions}
+          loadingModels={loadingModels}
           onChange={updateAppSettings}
           onTest={() => void testConnection()}
+          onFetchModels={() => void fetchModelOptions()}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -886,8 +1004,51 @@ function buildRevisionRequest(current: EditorState, settings: AppSettings): Pars
     model: settings.model,
     temperature: settings.temperature,
     stream: settings.stream,
+    connection: connectionFor(settings),
   });
   return parsed.success ? parsed.data : null;
+}
+
+function connectionFor(settings: AppSettings): Connection | undefined {
+  if (!usesCustomConnection(settings)) {
+    return undefined;
+  }
+  return {
+    provider: settings.provider,
+    baseUrl: settings.baseUrl.trim(),
+    apiKey: settings.apiKey.trim(),
+  };
+}
+
+function describeConnection(
+  settings: AppSettings,
+  config: ConfigResponse,
+): { usable: boolean; label: string; title: string } {
+  if (usesCustomConnection(settings)) {
+    const parsed = connectionSchema.safeParse(settings);
+    if (!parsed.success) {
+      return { usable: false, label: "配置不完整", title: parsed.error.issues[0]?.message ?? "" };
+    }
+    let host = settings.baseUrl.trim();
+    try {
+      host = new URL(host).host;
+    } catch {
+      // The schema already validated the URL; keep the raw value as a fallback label.
+    }
+    return {
+      usable: true,
+      label: `${PROVIDER_LABELS[settings.provider]} · ${host}`,
+      title: `${PROVIDER_LABELS[settings.provider]} · ${settings.baseUrl.trim()}`,
+    };
+  }
+  if (config.baseUrlConfigured && config.apiKeyConfigured) {
+    return {
+      usable: true,
+      label: `${PROVIDER_LABELS[config.provider]} · 服务器配置`,
+      title: "使用服务器 .env 中的模型服务配置",
+    };
+  }
+  return { usable: false, label: "未配置模型服务", title: "点击打开设置填写 Base URL 和 API key" };
 }
 
 function signatureForCurrent(current: EditorState, settings: AppSettings): string | null {
@@ -895,8 +1056,10 @@ function signatureForCurrent(current: EditorState, settings: AppSettings): strin
   return request ? signatureForRequest(request) : null;
 }
 
+// The API key is left out so that correcting a key does not mark an existing result as stale.
 function signatureForRequest(request: ParsedReviseRequest): string {
-  return JSON.stringify(request);
+  const { connection, ...rest } = request;
+  return JSON.stringify({ ...rest, provider: connection?.provider, baseUrl: connection?.baseUrl });
 }
 
 function editorHasContent(current: EditorState): boolean {

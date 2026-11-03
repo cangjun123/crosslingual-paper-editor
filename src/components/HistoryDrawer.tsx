@@ -1,5 +1,6 @@
 import { Clock3, RotateCcw, Trash2, X } from "lucide-react";
 import type { HistoryItem } from "../../shared/contracts";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { IconButton } from "./IconButton";
 
 type HistoryDrawerProps = {
@@ -10,10 +11,13 @@ type HistoryDrawerProps = {
 };
 
 export function HistoryDrawer({ history, onRestore, onDelete, onClose }: HistoryDrawerProps) {
+  useEscapeKey(onClose);
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
       <aside
         className="history-drawer"
+        role="dialog"
+        aria-modal="true"
         aria-labelledby="history-title"
         onMouseDown={(event) => event.stopPropagation()}
       >

@@ -7,6 +7,7 @@ const apiMocks = vi.hoisted(() => ({
   translateToChinese: vi.fn(),
   reviseEnglish: vi.fn(),
   testLlm: vi.fn(),
+  listModels: vi.fn(),
 }));
 
 vi.mock("./lib/api", () => ({
@@ -15,12 +16,14 @@ vi.mock("./lib/api", () => ({
 }));
 
 import App from "./App";
+import { SETTINGS_STORAGE_KEY } from "./lib/storage";
 
 describe("editor workflow", () => {
   beforeEach(() => {
     localStorage.clear();
     apiMocks.fetchConfig.mockResolvedValue({
       defaultModel: "test-model",
+      provider: "openai",
       baseUrlConfigured: true,
       apiKeyConfigured: true,
     });
@@ -114,5 +117,54 @@ describe("editor workflow", () => {
 
     await user.click(screen.getByRole("button", { name: "历史版本" }));
     expect(await screen.findByText("自动备份")).toBeInTheDocument();
+  });
+
+  it("stores the browser connection and sends it with every request", async () => {
+    apiMocks.fetchConfig.mockResolvedValue({
+      defaultModel: "test-model",
+      provider: "openai",
+      baseUrlConfigured: false,
+      apiKeyConfigured: false,
+    });
+    apiMocks.listModels.mockResolvedValue(["gemini-pro", "gemini-flash"]);
+    const user = userEvent.setup();
+    const { unmount } = render(<App />);
+
+    expect(await screen.findByText(/尚未配置模型服务/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "打开设置" }));
+    await user.click(screen.getByRole("radio", { name: "Gemini" }));
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: "https://relay.test/gemini" } });
+    expect(screen.getByText("https://relay.test/gemini/v1beta")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "secret-key" } });
+    fireEvent.change(screen.getByLabelText("模型", { selector: "#settings-model" }), {
+      target: { value: "gemini-pro" },
+    });
+    await user.click(screen.getByRole("button", { name: /获取列表/ }));
+    expect(await screen.findByText("已获取 2 个模型。")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText(/尚未配置模型服务/)).not.toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) ?? "{}")).toMatchObject({
+        provider: "gemini",
+        baseUrl: "https://relay.test/gemini",
+        apiKey: "secret-key",
+        model: "gemini-pro",
+      }),
+    );
+    unmount();
+
+    render(<App />);
+    const original = await screen.findByLabelText("原英文段落");
+    expect(screen.getByRole("button", { name: /Gemini · relay.test/ })).toBeInTheDocument();
+    fireEvent.change(original, { target: { value: "Original English." } });
+    fireEvent.keyDown(original, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => expect(apiMocks.translateToChinese).toHaveBeenCalledOnce());
+    expect(apiMocks.translateToChinese.mock.calls[0]?.[0]).toMatchObject({
+      model: "gemini-pro",
+      connection: { provider: "gemini", baseUrl: "https://relay.test/gemini", apiKey: "secret-key" },
+    });
   });
 });

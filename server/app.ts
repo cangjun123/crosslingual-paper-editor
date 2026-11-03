@@ -3,21 +3,30 @@ import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import type { ApiErrorBody } from "../shared/contracts.js";
 import {
+  listModelsRequestSchema,
   reviseRequestSchema,
   testLlmRequestSchema,
   translateRequestSchema,
 } from "../shared/contracts.js";
+import { usesCustomConnection, type Connection } from "../shared/providers.js";
 import type { ServerConfig } from "./config.js";
 import { publicConfig } from "./config.js";
 import { AppError, normalizeError } from "./errors.js";
-import { OpenAiLlmService, type GenerationParams, type LlmService } from "./llm.js";
+import {
+  createLlmService,
+  type GenerationParams,
+  type LlmService,
+  type ResolvedConnection,
+} from "./llm.js";
 import { buildRevisionMessages, buildTranslationMessages, type ChatMessage } from "./prompts.js";
 
 type AppDependencies = {
   config: ServerConfig;
-  llm?: LlmService;
+  createLlm?: (connection: ResolvedConnection) => LlmService;
   clientDist?: string;
 };
+
+type LlmResolver = (connection: Connection | undefined) => LlmService;
 
 type GenerationHandlerOptions<T> = {
   parse: (body: unknown) => T;
@@ -29,9 +38,14 @@ type GenerationInput = {
   model: string;
   temperature: number;
   stream: boolean;
+  connection?: Connection;
 };
 
-export function createApp({ config, llm, clientDist }: AppDependencies): express.Express {
+export function createApp({
+  config,
+  createLlm = createLlmService,
+  clientDist,
+}: AppDependencies): express.Express {
   const app = express();
   app.disable("x-powered-by");
   app.use(express.json({ limit: "5mb" }));
@@ -41,7 +55,29 @@ export function createApp({ config, llm, clientDist }: AppDependencies): express
     next();
   });
 
-  const getLlm = (): LlmService => llm ?? new OpenAiLlmService(config);
+  // Browser-supplied credentials are used as a complete set; the server key is never sent to a
+  // browser-supplied URL.
+  const getLlm: LlmResolver = (connection) => {
+    if (connection && usesCustomConnection(connection)) {
+      return createLlm(connection);
+    }
+    if (!config.apiKey || !config.baseUrl) {
+      throw new AppError(
+        503,
+        "CONFIG_MISSING",
+        "尚未配置模型服务，请在设置中填写 Base URL 和 API key。",
+      );
+    }
+    try {
+      return createLlm({ provider: config.provider, baseUrl: config.baseUrl, apiKey: config.apiKey });
+    } catch (error) {
+      throw new AppError(
+        503,
+        "CONFIG_INVALID",
+        `后端 .env 中的 LLM 配置无效：${error instanceof Error ? error.message : "未知错误"}`,
+      );
+    }
+  };
 
   app.get("/api/health", (_request, response) => {
     response.json({ status: "ok" });
@@ -72,8 +108,9 @@ export function createApp({ config, llm, clientDist }: AppDependencies): express
   app.post("/api/test-llm", async (request, response, next) => {
     try {
       const input = testLlmRequestSchema.parse(request.body);
+      const llm = getLlm(input.connection);
       const startedAt = performance.now();
-      await getLlm().complete({
+      await llm.complete({
         model: input.model,
         temperature: input.temperature,
         messages: [
@@ -86,6 +123,20 @@ export function createApp({ config, llm, clientDist }: AppDependencies): express
         model: input.model,
         latencyMs: Math.round(performance.now() - startedAt),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/models", async (request, response, next) => {
+    try {
+      const input = listModelsRequestSchema.parse(request.body ?? {});
+      const llm = getLlm(input.connection);
+      if (!llm.listModels) {
+        throw new AppError(501, "NOT_SUPPORTED", "当前服务不支持获取模型列表。");
+      }
+      const models = [...new Set(await llm.listModels())].sort((a, b) => a.localeCompare(b));
+      response.json({ models });
     } catch (error) {
       next(error);
     }
@@ -118,13 +169,15 @@ export function createApp({ config, llm, clientDist }: AppDependencies): express
 }
 
 function generationHandler<T extends GenerationInput>(
-  getLlm: () => LlmService,
+  getLlm: LlmResolver,
   options: GenerationHandlerOptions<T>,
 ) {
   return async (request: Request, response: Response, next: NextFunction): Promise<void> => {
     let input: T;
+    let llm: LlmService;
     try {
       input = options.parse(request.body);
+      llm = getLlm(input.connection);
     } catch (error) {
       next(error);
       return;
@@ -147,7 +200,7 @@ function generationHandler<T extends GenerationInput>(
 
     if (!input.stream) {
       try {
-        const text = await getLlm().complete(params);
+        const text = await llm.complete(params);
         response.json({ [options.responseKey]: text });
       } catch (error) {
         if (abortController.signal.aborted || response.destroyed) {
@@ -167,7 +220,7 @@ function generationHandler<T extends GenerationInput>(
 
     let fullText = "";
     try {
-      for await (const delta of getLlm().stream(params)) {
+      for await (const delta of llm.stream(params)) {
         fullText += delta;
         writeSse(response, "delta", { text: delta });
       }
